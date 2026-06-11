@@ -125,7 +125,6 @@ async def docker_run_container(ram_gb, cpu, disk_gb):
         "--tmpfs", "/run/lock",
         "-v", "/sys/fs/cgroup:/sys/fs/cgroup:rw",
         "--name", name,
-        "--cpus", str(cpu),
         "--memory", f"{ram_gb}g",
         "--memory-swap", f"{ram_gb}g",
         "-p", f"{http_port}:80",
