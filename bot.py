@@ -1903,19 +1903,19 @@ async def plan(interaction: discord.Interaction):
     embed = discord.Embed(title="💰 VPS Plans", color=discord.Color.green())
     
     embed.add_field(
-        name="🎯 Basic Plan - ₹49",
+        name="🎯 Basic Plan - $10",
         value="• 32GB RAM\n• 6 CPU Cores\n• 100GB Disk\n• 15 Days Validity\n• Full Root Access\n• Systemctl Support\n• Pterodactyl Ready",
         inline=False
     )
     
     embed.add_field(
-        name="💎 Premium Plan - ₹99", 
+        name="💎 Premium Plan - $20", 
         value="• 64GB RAM\n• 12 CPU Cores\n• 200GB Disk\n• 30 Days Validity\n• Priority Support\n• All Basic Features",
         inline=False
     )
     
     embed.add_field(
-        name="🚀 Ultimate Plan - ₹199",
+        name="🚀 Ultimate Plan - $30",
         value="• 128GB RAM\n• 24 CPU Cores\n• 500GB Disk\n• 60 Days Validity\n• Dedicated Resources\n• All Premium Features",
         inline=False
     )
