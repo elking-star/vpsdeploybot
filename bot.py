@@ -135,7 +135,16 @@ bot = Bot()
 async def docker_run_container(ram_gb, cpu, disk_gb):
     http_port = random.randint(3000,3999)
     name = f"vps-{random.randint(1000,9999)}"
-    
+
+    # CPU OVERSUBSCRIPTION BYPASS: Docker rejects --cpus greater than the host's
+    # real core count. We clamp the ACTUAL --cpus flag to the host max so any
+    # requested value is accepted. The VPS still REPORTS the chosen core count
+    # (cpuinfo is spoofed elsewhere); real scheduling is bounded by hardware.
+    host_cpus = os.cpu_count() or 1
+    effective_cpu = min(float(cpu), float(host_cpus))
+    # Trim trailing .0 so "5.0" -> "5" for a clean flag.
+    cpu_flag = str(int(effective_cpu)) if effective_cpu == int(effective_cpu) else str(effective_cpu)
+
     # Base flags (RAM/CPU work fine, left untouched).
     base = [
         "docker", "run", "-d",
@@ -145,7 +154,7 @@ async def docker_run_container(ram_gb, cpu, disk_gb):
         "--tmpfs", "/run/lock",
         "-v", "/sys/fs/cgroup:/sys/fs/cgroup:rw",
         "--name", name,
-        "--cpus", str(cpu),
+        "--cpus", cpu_flag,
         "--memory", f"{ram_gb}g",
         "--memory-swap", f"{ram_gb}g",
         "-p", f"{http_port}:80",
@@ -2399,6 +2408,13 @@ async def create_vps_admin(interaction: discord.Interaction, ram_gb: int, disk_g
         return
 
     await interaction.response.defer(ephemeral=True)
+
+    # Validate specs (CPU oversubscription is allowed — docker_run_container
+    # clamps the real --cpus flag to the host while the VPS still reports the
+    # chosen core count).
+    if ram_gb <= 0 or cpu <= 0 or disk_gb <= 0:
+        await interaction.followup.send("❌ RAM, CPU, and Disk must be positive numbers.", ephemeral=True)
+        return
 
     target_uid = str(user.id)
     target_is_admin = user.id in ADMIN_IDS
