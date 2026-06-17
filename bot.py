@@ -1861,40 +1861,6 @@ async def unsuspend_vps(interaction: discord.Interaction, container_id: str):
     else:
         await interaction.followup.send("❌ Failed to unsuspend VPS.", ephemeral=True)
 
-@bot.tree.command(name="plan", description="View VPS plans and payment information")
-async def plan(interaction: discord.Interaction):
-    """View VPS plans and payment information"""
-    embed = discord.Embed(title="💰 VPS Plans", color=discord.Color.green())
-    
-    embed.add_field(
-        name="🎯 Basic Plan - $5",
-        value="• 32GB RAM\n• 6 CPU Cores\n• 100GB Disk\n• 15 Days Validity\n• Full Root Access\n• Systemctl Support\n• Pterodactyl Ready",
-        inline=False
-    )
-    
-    embed.add_field(
-        name="💎 Premium Plan - $15", 
-        value="• 64GB RAM\n• 12 CPU Cores\n• 200GB Disk\n• 30 Days Validity\n• Priority Support\n• All Basic Features",
-        inline=False
-    )
-    
-    embed.add_field(
-        name="🚀 Ultimate Plan - $30",
-        value="• 128GB RAM\n• 24 CPU Cores\n• 500GB Disk\n• 60 Days Validity\n• Dedicated Resources\n• All Premium Features",
-        inline=False
-    )
-    
-    embed.set_image(url=QR_IMAGE)
-    embed.add_field(
-        name="📞 How to Purchase",
-        value="1. Scan the QR code above to make payment\n2. Take a screenshot of payment confirmation\n3. Create a ticket with your payment proof\n4. We'll activate your VPS within 24 hours\n5. Enjoy your high-performance VPS!",
-        inline=False
-    )
-    
-    embed.set_footer(text="Need help? Contact support or create a ticket!")
-    
-    await interaction.response.send_message(embed=embed, ephemeral=False)
-
 @bot.tree.command(name="pointbal", description="Show your points balance")
 async def pointbal(interaction: discord.Interaction):
     """Check your points balance"""
@@ -2488,11 +2454,8 @@ async def help_command(interaction: discord.Interaction):
     `/claimpoint` - Convert invites to points (1:1)
     `/point_share <amount> <user>` - Share points with others
     `/pointtop` - View points leaderboard
-    
-    **💸 Payment Plans:**
-    `/plan` - View VPS plans and payment options
     """
-    
+
     # Admin Commands
     admin_commands = """
     **🛠️ Admin VPS Controls:**
