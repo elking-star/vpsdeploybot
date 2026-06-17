@@ -112,120 +112,12 @@ class Bot(commands.Bot):
 bot = Bot()
 
 # ---------------- Docker Helpers ----------------
-
-import base64 as _base64
-import os as _os
-
-DISK_IMAGES_DIR = "/var/lib/vps-disks"
-
-
-async def _dexec(container_id: str, bash_cmd: str, timeout: int = 60):
-    """Run a bash command inside a container."""
-    proc = await asyncio.create_subprocess_exec(
-        "docker", "exec", container_id, "bash", "-c", bash_cmd,
-        stdout=asyncio.subprocess.PIPE,
-        stderr=asyncio.subprocess.PIPE,
-    )
-    try:
-        out, err = await asyncio.wait_for(proc.communicate(), timeout=timeout)
-        return proc.returncode, out.decode().strip(), err.decode().strip()
-    except asyncio.TimeoutError:
-        proc.kill()
-        return -1, "", "timeout"
-
-
-async def _run(cmd: list, timeout: int = 60):
-    """Run a host-level command."""
-    proc = await asyncio.create_subprocess_exec(
-        *cmd,
-        stdout=asyncio.subprocess.PIPE,
-        stderr=asyncio.subprocess.PIPE,
-    )
-    try:
-        out, err = await asyncio.wait_for(proc.communicate(), timeout=timeout)
-        return proc.returncode, out.decode().strip(), err.decode().strip()
-    except asyncio.TimeoutError:
-        proc.kill()
-        return -1, "", "timeout"
-
-
-async def create_disk_image(container_name: str, disk_gb: int):
-    """
-    Create a REAL ext4 disk image of exactly disk_gb GB and mount it.
-    Returns (image_path, mount_path, error_or_None).
-    df -h inside the container shows real size + real used/free.
-    """
-    _os.makedirs(DISK_IMAGES_DIR, exist_ok=True)
-    img = _os.path.join(DISK_IMAGES_DIR, f"{container_name}.img")
-    mnt = _os.path.join(DISK_IMAGES_DIR, f"{container_name}-mnt")
-    _os.makedirs(mnt, exist_ok=True)
-
-    # Check host free space (leave 3 GB headroom)
-    rc, out, _ = await _run(["df", "-BG", "--output=avail", DISK_IMAGES_DIR])
-    try:
-        avail_gb = int(out.strip().splitlines()[-1].replace("G", "").strip())
-    except Exception:
-        avail_gb = 9999
-    if avail_gb < disk_gb + 3:
-        return None, None, (
-            f"Host only has {avail_gb}GB free. Need {disk_gb + 3}GB."
-        )
-
-    # Sparse image — uses host blocks only as the VPS writes data
-    rc, _, err = await _run(["truncate", "-s", f"{disk_gb}G", img])
-    if rc != 0:
-        return None, None, f"truncate failed: {err}"
-
-    rc, _, err = await _run([
-        "mkfs.ext4", "-F", "-L", container_name,
-        "-m", "1", "-E", "lazy_itable_init=0", img
-    ], timeout=120)
-    if rc != 0:
-        return None, None, f"mkfs.ext4 failed: {err}"
-
-    rc, _, err = await _run(["mount", "-o", "loop,noatime", img, mnt])
-    if rc != 0:
-        return None, None, f"mount failed: {err}"
-
-    logger.info(f"[disk] {container_name}: {disk_gb}GB image mounted at {mnt}")
-    return img, mnt, None
-
-
-async def cleanup_disk_image(container_name: str):
-    """Unmount and delete a container's disk image."""
-    img = _os.path.join(DISK_IMAGES_DIR, f"{container_name}.img")
-    mnt = _os.path.join(DISK_IMAGES_DIR, f"{container_name}-mnt")
-    await _run(["umount", "-lf", mnt])
-    await _run(["rm", "-f", img])
-    await _run(["rmdir", mnt])
-    logger.info(f"[disk] Cleaned up image for {container_name}")
-
-
 async def docker_run_container(ram_gb, cpu, disk_gb):
-    """
-    Create a Docker container with REAL enforced specs.
-
-    RAM  -> --memory hard cgroup limit (kernel enforces it).
-            --memory-swap = 2x RAM so no OOM kills on spikes.
-    CPU  -> --cpus hard cgroup limit (kernel scheduler enforces it).
-    DISK -> Real ext4 loop image of exactly disk_gb mounted at /mnt/data.
-            df -h shows real size and real used/free. NOT a fake display.
-
-    ERROR BYPASS -> If resource flags fail (cgroup mismatch, swap accounting
-    disabled), retries without them and applies via 'docker update' after.
-    Container ALWAYS gets created regardless of limit errors.
-    """
-    http_port = random.randint(3000, 3999)
-    name      = f"vps-{random.randint(10000, 99999)}"
-    swap_gb   = ram_gb * 2
-
-    # Create real disk image first
-    img_path, mnt_path, disk_err = await create_disk_image(name, disk_gb)
-    if disk_err:
-        logger.warning(f"[disk] Falling back to no disk image: {disk_err}")
-        img_path, mnt_path = None, None
-
-    base_cmd = [
+    http_port = random.randint(3000,3999)
+    name = f"vps-{random.randint(1000,9999)}"
+    
+    # Base flags (RAM/CPU work fine, left untouched).
+    base = [
         "docker", "run", "-d",
         "--privileged",
         "--cgroupns=host",
@@ -233,194 +125,91 @@ async def docker_run_container(ram_gb, cpu, disk_gb):
         "--tmpfs", "/run/lock",
         "-v", "/sys/fs/cgroup:/sys/fs/cgroup:rw",
         "--name", name,
+        "--cpus", str(cpu),
+        "--memory", f"{ram_gb}g",
+        "--memory-swap", f"{ram_gb}g",
         "-p", f"{http_port}:80",
     ]
-    if mnt_path:
-        base_cmd += ["-v", f"{mnt_path}:/mnt/data"]
+    # DISK LIMIT: --storage-opt size= caps the container's ROOT overlay so
+    # `df -h /` inside the VPS shows exactly disk_gb. This WORKS on the ZFS
+    # storage driver (and XFS-pquota / btrfs). It does NOT work on
+    # overlay2-over-ext4 or the containerd snapshotter — there we fall back to
+    # creating the VPS uncapped and log how to fix the host.
+    storage_flag = ["--storage-opt", f"size={int(disk_gb)}G"]
+    image_tail = [IMAGE]  # systemd-enabled image with /sbin/init
+    async def _run(flags):
+        proc = await asyncio.create_subprocess_exec(
+            *flags, stdout=asyncio.subprocess.PIPE, stderr=asyncio.subprocess.PIPE)
+        out, err = await proc.communicate()
+        return proc.returncode, out, err
 
-    resource_flags = [
-        "--memory",      f"{ram_gb}g",
-        "--memory-swap", f"{swap_gb}g",
-        "--cpus",        str(cpu),
-    ]
-
-    rc, out, err = await _run(base_cmd + resource_flags + [IMAGE], timeout=60)
-
-    if rc != 0:
-        # Retry without resource flags — apply via docker update after creation
-        logger.warning(f"[docker] Run with limits failed, retrying clean: {err[:100]}")
-        rc, out, err = await _run(base_cmd + [IMAGE], timeout=60)
-        if rc != 0:
-            if mnt_path:
-                await cleanup_disk_image(name)
-            return None, None, f"Container creation failed: {err}"
-
-        container_id = out.strip()[:12]
-        # Apply limits via update — works on all kernel/cgroup versions
-        update_rc, _, update_err = await _run([
-            "docker", "update",
-            "--memory",      f"{ram_gb}g",
-            "--memory-swap", f"{swap_gb}g",
-            "--cpus",        str(cpu),
-            container_id,
-        ], timeout=30)
-        if update_rc != 0:
-            logger.warning(f"[docker] update limits also failed: {update_err}")
-    else:
-        container_id = out.strip()[:12]
-
-    if not container_id:
-        if mnt_path:
-            await cleanup_disk_image(name)
-        return None, None, "Failed to get container ID"
-
-    logger.info(f"[docker] Created {container_id} ram={ram_gb}g cpu={cpu} disk={disk_gb}g")
-    return container_id, http_port, None
-
-
-async def setup_vps_specs(container_id: str, ram_gb: int, cpu: int, disk_gb: int):
-    """
-    Fix /proc/meminfo and /proc/cpuinfo so free/neofetch/htop show correct specs.
-
-    Docker --memory sets a real cgroup limit but /proc/meminfo still reads
-    host RAM. We write a correct fake_meminfo and bind-mount it permanently.
-    Same for /proc/cpuinfo — --cpus limits scheduling but nproc reads host
-    core count. We write fake_cpuinfo with exactly `cpu` AMD EPYC processors.
-
-    A systemd unit (proc-override.service) re-applies both on every restart.
-    The real disk at /mnt/data already shows correct size via df -h /mnt/data.
-    """
-    ram_kb    = ram_gb * 1024 * 1024
-    swap_kb   = ram_gb * 2 * 1024 * 1024
-    free_kb   = int(ram_kb * 0.80)
-    avail_kb  = int(ram_kb * 0.78)
-    cached_kb = int(ram_kb * 0.10)
-    buf_kb    = int(ram_kb * 0.02)
-
-    meminfo_lines = [
-        f"MemTotal:       {ram_kb:>10} kB",
-        f"MemFree:        {free_kb:>10} kB",
-        f"MemAvailable:   {avail_kb:>10} kB",
-        f"Buffers:        {buf_kb:>10} kB",
-        f"Cached:         {cached_kb:>10} kB",
-        "SwapCached:              0 kB",
-        f"Active:         {int(ram_kb*0.15):>10} kB",
-        f"Inactive:       {int(ram_kb*0.05):>10} kB",
-        f"SwapTotal:      {swap_kb:>10} kB",
-        f"SwapFree:       {swap_kb:>10} kB",
-        "Dirty:                   0 kB",
-        "Writeback:               0 kB",
-        f"AnonPages:      {int(ram_kb*0.12):>10} kB",
-        f"Mapped:         {int(ram_kb*0.03):>10} kB",
-        "Shmem:                   0 kB",
-        f"Slab:           {int(ram_kb*0.02):>10} kB",
-        "VmallocTotal:   34359738367 kB",
-        "VmallocUsed:             0 kB",
-        "HugePages_Total:         0",
-        "HugePages_Free:          0",
-        "Hugepagesize:         2048 kB",
-    ]
-    meminfo = "\n".join(meminfo_lines) + "\n"
-
-    mhz      = 3500.0
-    bogomips = mhz * 2
-    cpu_blocks = []
-    for i in range(cpu):
-        cpu_blocks.append("\n".join([
-            f"processor\t: {i}",
-            "vendor_id\t: AuthenticAMD",
-            "cpu family\t: 25",
-            "model name\t: AMD EPYC 9654 96-Core Processor",
-            f"cpu MHz\t\t: {mhz:.3f}",
-            "cache size\t: 32768 KB",
-            "physical id\t: 0",
-            f"siblings\t: {cpu}",
-            f"core id\t\t: {i}",
-            f"cpu cores\t: {cpu}",
-            "fpu\t\t: yes",
-            "fpu_exception\t: yes",
-            "cpuid level\t: 16",
-            "wp\t\t: yes",
-            f"bogomips\t: {bogomips:.2f}",
-            "",
-        ]))
-    cpuinfo = "\n".join(cpu_blocks)
-
-    enc_mem = _base64.b64encode(meminfo.encode()).decode()
-    enc_cpu = _base64.b64encode(cpuinfo.encode()).decode()
-
-    await _dexec(container_id, f"echo {enc_mem} | base64 -d > /etc/fake_meminfo")
-    await _dexec(container_id, f"echo {enc_cpu} | base64 -d > /etc/fake_cpuinfo")
-
-    # Apply bind-mounts live right now
-    await _dexec(container_id, "mount --bind /etc/fake_meminfo /proc/meminfo")
-    await _dexec(container_id, "mount --bind /etc/fake_cpuinfo /proc/cpuinfo")
-
-    # /data -> /mnt/data (the real ext4 disk image)
-    await _dexec(container_id, "ln -sf /mnt/data /data 2>/dev/null || true")
-
-    svc_lines = [
-        "[Unit]",
-        "Description=VPS Spec Override",
-        "DefaultDependencies=no",
-        "After=systemd-remount-fs.service",
-        "Before=sysinit.target local-fs.target",
-        "",
-        "[Service]",
-        "Type=oneshot",
-        "RemainAfterExit=yes",
-        "ExecStart=/bin/bash -c 'mount --bind /etc/fake_meminfo /proc/meminfo || true'",
-        "ExecStart=/bin/bash -c 'mount --bind /etc/fake_cpuinfo /proc/cpuinfo || true'",
-        "",
-        "[Install]",
-        "WantedBy=sysinit.target",
-    ]
-    svc = "\n".join(svc_lines) + "\n"
-    enc_svc = _base64.b64encode(svc.encode()).decode()
-    await _dexec(container_id, f"echo {enc_svc} | base64 -d > /etc/systemd/system/proc-override.service")
-    await _dexec(container_id, "systemctl daemon-reload")
-    await _dexec(container_id, "systemctl enable proc-override.service")
-
-    logger.info(f"[specs] {container_id}: {cpu} CPU / {ram_gb}GB RAM / {disk_gb}GB Disk applied")
-
-
-async def setup_vps_environment(container_id, ram_gb=DEFAULT_RAM_GB, cpu=DEFAULT_CPU, disk_gb=DEFAULT_DISK_GB):
     try:
-        await asyncio.sleep(15)
+        # Attempt WITH the disk quota first.
+        rc, out, err = await _run(base + storage_flag + image_tail)
 
+        if rc != 0:
+            emsg = (err.decode().strip() if err else "")
+            low = emsg.lower()
+            # Storage driver doesn't support size quotas — retry without it.
+            if "storage-opt" in low or "not supported" in low or "pquota" in low or "size" in low:
+                logger.warning(
+                    "Disk quota (--storage-opt size=%sG) REJECTED by Docker "
+                    "storage driver; creating VPS WITHOUT the cap. For the size "
+                    "to show in `df -h /`, switch Docker to the btrfs storage "
+                    "driver (run setup-docker-btrfs.sh). Driver said: %s",
+                    int(disk_gb), emsg)
+                rc, out, err = await _run(base + image_tail)
+                if rc != 0:
+                    return None, None, f"Container creation failed: {err.decode().strip() if err else 'Unknown error'}"
+            else:
+                return None, None, f"Container creation failed: {emsg or 'Unknown error'}"
+
+        container_id = out.decode().strip()[:12] if out else None
+        if not container_id:
+            return None, None, "Failed to get container ID"
+
+        return container_id, http_port, None
+    except Exception as e:
+        return None, None, f"Container run exception: {str(e)}"
+
+async def setup_vps_environment(container_id):
+    try:
+        # Wait for systemd to start
+        await asyncio.sleep(15)
+        
+        # Update and install essentials
         commands = [
             "apt-get update -y",
             "apt-get install -y tmate curl wget neofetch sudo nano htop",
             "systemctl enable systemd-user-sessions",
-            "systemctl start systemd-user-sessions",
+            "systemctl start systemd-user-sessions"
         ]
+        
         for cmd in commands:
             try:
                 proc = await asyncio.create_subprocess_exec(
                     "docker", "exec", container_id, "bash", "-c", cmd,
                     stdout=subprocess.DEVNULL,
-                    stderr=subprocess.DEVNULL,
+                    stderr=subprocess.DEVNULL
                 )
                 await asyncio.wait_for(proc.communicate(), timeout=120)
             except asyncio.TimeoutError:
-                logger.warning(f"Timeout: {cmd}")
+                logger.warning(f"Timeout on command: {cmd}")
+                continue
             except Exception as e:
-                logger.warning(f"Failed {cmd}: {e}")
-
+                logger.warning(f"Command failed {cmd}: {e}")
+                continue
+        
+        # Test systemctl
         test_proc = await asyncio.create_subprocess_exec(
             "docker", "exec", container_id, "systemctl", "--version",
-            stdout=asyncio.subprocess.PIPE, stderr=asyncio.subprocess.PIPE,
+            stdout=asyncio.subprocess.PIPE, stderr=asyncio.subprocess.PIPE
         )
         await test_proc.communicate()
-
-        # Apply real specs — RAM, CPU display fix + real disk
-        await setup_vps_specs(container_id, ram_gb, cpu, disk_gb)
-
+        
         return True, None
     except Exception as e:
         return False, str(e)
-
-
 
 async def docker_exec_capture_ssh(container_id):
     try:
@@ -475,17 +264,8 @@ async def docker_restart_container(container_id):
 
 async def docker_remove_container(container_id):
     try:
-        # Get container name so we can clean up its real disk image
-        rc, name_out, _ = await _run(["docker", "inspect", "--format", "{{.Name}}", container_id])
-        container_name = name_out.strip().lstrip("/") if rc == 0 else None
-
         proc = await asyncio.create_subprocess_exec("docker", "rm", "-f", container_id)
         await proc.communicate()
-
-        # Remove the real ext4 disk image created for this container
-        if container_name:
-            await cleanup_disk_image(container_name)
-
         return True
     except:
         return False
@@ -628,7 +408,7 @@ async def create_vps(owner_id, ram=DEFAULT_RAM_GB, cpu=DEFAULT_CPU, disk=DEFAULT
     await asyncio.sleep(10)
     
     # Setup environment
-    success, setup_err = await setup_vps_environment(cid, ram_gb=ram, cpu=cpu, disk_gb=disk)
+    success, setup_err = await setup_vps_environment(cid)
     if not success:
         logger.warning(f"Setup had issues for {cid}: {setup_err}")
     
