@@ -13,7 +13,7 @@ from datetime import datetime, timedelta
 # ---------------- CONFIG ----------------
 TOKEN = ""
 GUILD_ID = YOUR_DISCORD_SERVER_ID
-MAIN_ADMIN_IDS = {YOUR_USER_ID}  # CHANGED: Renamed to MAIN_ADMIN_IDS
+MAIN_ADMIN_IDS = {1169419713802154147}  # CHANGED: Renamed to MAIN_ADMIN_IDS
 SERVER_IP = "138.68.79.95"
 QR_IMAGE = "https://raw.githubusercontent.com/deadlauncherg/PUFFER-PANEL-IN-FIREBASE/main/qr.jpg"
 IMAGE = "jrei/systemd-ubuntu:22.04"
@@ -29,9 +29,29 @@ POINTS_PER_DEPLOY = 4
 POINTS_RENEW_15 = 3
 POINTS_RENEW_30 = 5
 VPS_LIFETIME_DAYS = 15
+# Fixed VPS pricing tiers. Cost is decided by the SMALLEST tier whose ram/cpu/
+# disk all meet-or-exceed the requested specs. Anything bigger than the top
+# tier is charged at the top-tier cost. Edit freely (keep ascending order).
+VPS_TIERS = [
+    {"ram": 2,  "cpu": 1,  "disk": 20,  "cost": 2},
+    {"ram": 4,  "cpu": 2,  "disk": 40,  "cost": 4},
+    {"ram": 8,  "cpu": 4,  "disk": 80,  "cost": 7},
+    {"ram": 16, "cpu": 6,  "disk": 120, "cost": 11},
+    {"ram": 24, "cpu": 8,  "disk": 180, "cost": 15},
+    {"ram": 32, "cpu": 12, "disk": 250, "cost": 20},
+]
+
+def cost_for_specs(ram_gb: int, cpu: int, disk_gb: int) -> int:
+    """Return the point cost for the given specs: the cheapest tier that fits
+    all three. If the request exceeds every tier, charge the top tier's cost."""
+    for tier in VPS_TIERS:
+        if ram_gb <= tier["ram"] and cpu <= tier["cpu"] and disk_gb <= tier["disk"]:
+            return tier["cost"]
+    return VPS_TIERS[-1]["cost"]
+
 RENEW_MODE_FILE = os.path.join(DATA_DIR, "renew_mode.json")
 LOG_CHANNEL_ID = None
-OWNER_ID = YOUR_USER_ID
+OWNER_ID = 1169419713802154147
 
 # Global admin sets
 ADMIN_IDS = set(MAIN_ADMIN_IDS)  # This will contain ALL admins (main + additional)
@@ -1039,98 +1059,6 @@ class GiveawayView(discord.ui.View):
 
 # ---------------- COMMANDS REGISTRATION ----------------
 # All commands are now properly registered as app_commands
-
-@bot.tree.command(name="deploy", description="Deploy a VPS (cost 4 points)")
-async def deploy(interaction: discord.Interaction):
-    """Deploy a new VPS - Points required before deployment"""
-    uid = str(interaction.user.id)
-    if uid not in users: 
-        users[uid] = {"points": 0, "inv_unclaimed": 0, "inv_total": 0}
-        persist_users()
-    
-    # Check points and BLOCK deployment if not enough
-    has_enough_points = users[uid]['points'] >= POINTS_PER_DEPLOY
-    is_admin = interaction.user.id in ADMIN_IDS
-    
-    # If user doesn't have enough points and is not admin, BLOCK deployment
-    if not has_enough_points and not is_admin:
-        await interaction.response.send_message(
-            f"❌ You need {POINTS_PER_DEPLOY} points to deploy a VPS. You only have {users[uid]['points']} points.\n\n"
-            f"**Ways to earn points:**\n"
-            f"• Use `/invite` to get invite links\n"
-            f"• Ask friends to join using your invite code\n"
-            f"• Wait for daily point resets\n"
-            f"• Participate in giveaways",
-            ephemeral=True
-        )
-        return
-    
-    original_points = users[uid]['points']
-    
-    # Send initial response based on points status
-    if not is_admin:
-        await interaction.response.send_message(
-            f"✅ You have enough points! Deploying VPS... (Cost: {POINTS_PER_DEPLOY} points)", 
-            ephemeral=True
-        )
-    else:
-        await interaction.response.send_message(
-            "🛠️ Admin deployment in progress...", 
-            ephemeral=True
-        )
-    
-    # Defer if not already done
-    if not interaction.response.is_done():
-        await interaction.response.defer(ephemeral=True)
-    
-    # Create VPS first
-    rec = await create_vps(interaction.user.id)
-    
-    if 'error' in rec:
-        await interaction.followup.send(f"❌ Error creating VPS: {rec['error']}", ephemeral=True)
-        return
-    
-    # Deduct points after successful VPS creation (only if not admin)
-    points_deducted = 0
-    if not is_admin:
-        users[uid]['points'] -= POINTS_PER_DEPLOY
-        points_deducted = POINTS_PER_DEPLOY
-        persist_users()
-    
-    systemctl_status = "✅ Working" if rec.get('systemctl_working') else "⚠️ Limited"
-    
-    embed = discord.Embed(title="🎉 Your VPS is Ready!", color=discord.Color.green())
-    embed.add_field(name="Container ID", value=f"`{rec['container_id']}`", inline=False)
-    embed.add_field(name="Specs", value=f"**{rec['ram']}GB RAM** | **{rec['cpu']} CPU** | **{rec['disk']}GB Disk**", inline=False)
-    embed.add_field(name="Expires", value=rec['expires_at'][:10], inline=True)
-    embed.add_field(name="Status", value="🟢 Active", inline=True)
-    embed.add_field(name="Systemctl", value=systemctl_status, inline=True)
-    embed.add_field(name="HTTP Access", value=f"http://{SERVER_IP}:{rec['http_port']}", inline=False)
-    embed.add_field(name="SSH Connection", value=f"```{rec['ssh']}```", inline=False)
-    
-    if not is_admin:
-        embed.add_field(name="Points Deducted", value=f"{-POINTS_PER_DEPLOY} points", inline=True)
-        embed.add_field(name="Remaining Points", value=f"{users[uid]['points']} points", inline=True)
-    
-    try: 
-        await interaction.user.send(embed=embed)
-        followup_msg = "✅ VPS created successfully! Check your DMs for details."
-        if not is_admin:
-            followup_msg += f"\n📊 Points: {original_points} → {users[uid]['points']} (-{POINTS_PER_DEPLOY})"
-        await interaction.followup.send(followup_msg, ephemeral=True)
-    except: 
-        followup_msg = "✅ VPS created! Could not DM you. Enable DMs from server members."
-        if not is_admin:
-            followup_msg += f"\n📊 Points: {original_points} → {users[uid]['points']} (-{POINTS_PER_DEPLOY})"
-        await interaction.followup.send(followup_msg, embed=embed, ephemeral=True)
-    
-    # Send log
-    await send_log(
-        "VPS Deployed", 
-        interaction.user, 
-        details=f"New VPS created with {rec['ram']}GB RAM, {rec['cpu']} CPU, {rec['disk']}GB Disk",
-        vps_id=rec['container_id']
-    )
 
 @bot.tree.command(name="list", description="List your VPS")
 async def list_vps(interaction: discord.Interaction):
@@ -2459,33 +2387,65 @@ async def listsall(interaction: discord.Interaction):
     user="Target user"
 )
 async def create_vps_admin(interaction: discord.Interaction, ram_gb: int, disk_gb: int, cpu: int, user: discord.Member):
-    """[ADMIN] Create a VPS for a user"""
+    """[ADMIN] Create a VPS for a user.
+
+    Point handling is based on the TARGET user, not the admin running it:
+      - Target is a normal user  -> charge the tier cost for the chosen specs
+                                     (see VPS_TIERS) and refuse if unaffordable.
+      - Target is an admin        -> free, no points touched.
+    """
     if interaction.user.id not in ADMIN_IDS:
         await interaction.response.send_message("❌ Admin only.", ephemeral=True)
         return
-    
+
     await interaction.response.defer(ephemeral=True)
-    
+
+    target_uid = str(user.id)
+    target_is_admin = user.id in ADMIN_IDS
+    cost = cost_for_specs(ram_gb, cpu, disk_gb)
+
+    # Charge the TARGET user (skip if the target is an admin).
+    if not target_is_admin:
+        if target_uid not in users:
+            users[target_uid] = {"points": 0, "inv_unclaimed": 0, "inv_total": 0}
+            persist_users()
+        if users[target_uid]['points'] < cost:
+            await interaction.followup.send(
+                f"❌ {user.mention} is a normal user and needs **{cost} points** "
+                f"for a {ram_gb}GB/{cpu}CPU/{disk_gb}GB VPS, but only has "
+                f"**{users[target_uid]['points']}**.",
+                ephemeral=True)
+            return
+
     rec = await create_vps(user.id, ram=ram_gb, cpu=cpu, disk=disk_gb, paid=True)
     if 'error' in rec:
         await interaction.followup.send(f"❌ Error creating VPS: {rec['error']}", ephemeral=True)
         return
-    
+
+    # Deduct points only after a successful create, and only for normal users.
+    charged_note = "Free (admin user)"
+    if not target_is_admin:
+        before = users[target_uid]['points']
+        users[target_uid]['points'] -= cost
+        persist_users()
+        charged_note = f"{before} → {users[target_uid]['points']} (-{cost})"
+
     systemctl_status = "✅ Working" if rec.get('systemctl_working') else "⚠️ Limited"
-    
+
     embed = discord.Embed(title="🛠️ Admin VPS Created", color=discord.Color.green())
     embed.add_field(name="Container ID", value=f"`{rec['container_id']}`", inline=False)
     embed.add_field(name="Specs", value=f"**{rec['ram']}GB RAM** | **{rec['cpu']} CPU** | **{rec['disk']}GB Disk**", inline=False)
     embed.add_field(name="For User", value=user.mention, inline=False)
+    embed.add_field(name="Points", value=charged_note, inline=True)
     embed.add_field(name="Systemctl", value=systemctl_status, inline=True)
     embed.add_field(name="Expires", value=rec['expires_at'][:10], inline=False)
     embed.add_field(name="HTTP", value=f"http://{SERVER_IP}:{rec['http_port']}", inline=False)
     embed.add_field(name="SSH", value=f"```{rec['ssh']}```", inline=False)
-    
-    try: 
+
+    try:
         await user.send(embed=embed)
         await interaction.followup.send(f"✅ VPS created for {user.mention}. Check their DMs.", ephemeral=True)
-    except: 
+    except Exception:
         await interaction.followup.send(embed=embed)
 
 @bot.tree.command(name="help", description="Show all available commands and their uses")
@@ -2496,7 +2456,6 @@ async def help_command(interaction: discord.Interaction):
     # User Commands
     user_commands = """
     **🎯 VPS Management:**
-    `/deploy` - Deploy a new VPS (4 points)
     `/list` - List your VPS
     `/remove <container_id>` - Remove VPS & refund points
     `/manage <container_id>` - Interactive VPS management
@@ -2548,7 +2507,7 @@ async def help_command(interaction: discord.Interaction):
     
     embed.add_field(
         name="📖 Quick Guide", 
-        value="• **Deploy Cost**: 4 points\n• **Renew Cost**: 3 points (15 days) / 5 points (30 days)\n• **VPS Specs**: 32GB RAM, 6 CPU, 100GB Disk\n• **Systemctl**: ✅ Now fully supported\n• **Auto Expiry**: VPS auto-suspend after expiry\n• **Giveaway VPS**: Cannot be renewed, auto-delete after 15 days\n• **Payment Plans**: Starting from ₹49",
+        value="• **VPS Cost**: 4 points (created by an admin via `/create_vps`)\n• **Renew Cost**: 3 points (15 days) / 5 points (30 days)\n• **Systemctl**: ✅ Now fully supported\n• **Auto Expiry**: VPS auto-suspend after expiry\n• **Giveaway VPS**: Cannot be renewed, auto-delete after 15 days\n• **Payment Plans**: Starting from ₹49",
         inline=False
     )
     
